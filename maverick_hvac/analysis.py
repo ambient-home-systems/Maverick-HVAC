@@ -567,7 +567,7 @@ def analyze(series, s, now_ts, names=None, forecast=None, tou=None, setpoints=No
                 "mild_events": aux["mild_events"]},
         "coast": coast(series, s),
         "rooms": rooms(series, s, names or {}, now_ts),
-        "tou": tou_analysis(series, s, tou, model, now_ts, setpoints),
+        "tou": tou_analysis(series, s, tou, model, now_ts, setpoints, names=names),
     }
 
 
@@ -694,7 +694,7 @@ def _label(day, setpoints, s):
 METRICS = ("cost", "kwh", "peak_kwh", "rec_kwh", "rec_aux", "excess")
 
 
-def _compare(test, ctrl, nbins=4):
+def _compare(test, ctrl, nbins=4, metrics=METRICS):
     """Weather-matched difference ctrl - test (positive = the test group used / cost
     less). Days are binned on the model's expected kWh (the weather), differences
     are taken inside each bin and combined with weights n1*n2/(n1+n2)."""
@@ -704,7 +704,7 @@ def _compare(test, ctrl, nbins=4):
     edges = [both[int(len(both) * i / nbins)] for i in range(1, nbins)]
     bin_of = lambda v: sum(1 for e in edges if v >= e)
     res = {"n_test": len(test), "n_ctrl": len(ctrl), "bins_used": 0}
-    acc = {m: [0.0, 0.0, 0.0] for m in METRICS}  # sum w*diff, sum w, sum w^2*var
+    acc = {m: [0.0, 0.0, 0.0] for m in metrics}  # sum w*diff, sum w, sum w^2*var
     for b in range(nbins):
         t = [d for d in test if d["expected"] is not None and bin_of(d["expected"]) == b]
         c = [d for d in ctrl if d["expected"] is not None and bin_of(d["expected"]) == b]
@@ -712,7 +712,7 @@ def _compare(test, ctrl, nbins=4):
             continue
         res["bins_used"] += 1
         w = len(t) * len(c) / (len(t) + len(c))
-        for m in METRICS:
+        for m in metrics:
             tv, cv = [d[m] for d in t], [d[m] for d in c]
             mt, mc = sum(tv) / len(tv), sum(cv) / len(cv)
             var = _var(tv) / len(tv) + _var(cv) / len(cv)
@@ -721,7 +721,7 @@ def _compare(test, ctrl, nbins=4):
             acc[m][2] += w * w * var
     if res["bins_used"] == 0:
         return None
-    for m in METRICS:
+    for m in metrics:
         sw = acc[m][1]
         res[m] = acc[m][0] / sw
         res[m + "_se"] = math.sqrt(acc[m][2]) / sw
@@ -735,7 +735,67 @@ def _var(xs):
     return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
 
 
-def tou_analysis(series, s, tou, model, now_ts, setpoints=None, min_days=5):
+def _room_days(days, temps):
+    """Per day, one room's temperature path through the peak, anchored on the hour
+    before it starts: the change by the end of the peak (``drift``: up when cooling
+    sets back, down when heating does), the temperature at the end of the peak,
+    and how many hours after the peak until it is back within the band of where it
+    started. None for days missing those hours."""
+    out = []
+    for d in days:
+        win, ts = d["win"], d["ts"]
+        a_h, z_h = win[0] - 1, win[-1]
+        get = lambda h: temps.get(ts.get(h), {}).get("mean") if h in ts else None
+        a, z = get(a_h), get(z_h)
+        if a is None or z is None:
+            continue
+        back = None
+        for k in range(1, 7):
+            v = get(z_h + k)
+            if v is not None and abs(v - a) <= d["_band"]:
+                back = k
+                break
+        out.append({"expected": d["expected"], "drift": z - a, "end_temp": z, "back_h": back if back is not None else 7,
+                    "path": [get(h) for h in range(24)], "anchor": a})
+    return out
+
+
+def room_impact(series, days_test, days_ctrl, names, s):
+    """Every room (and the thermostat) on setback days against comparison days in
+    the same weather: extra drift during the peak, how warm / cold it ends, how long
+    it takes to recover. The answer to "what does the setback do to the rooms"."""
+    band = 0.5 if s.unit == "F" else 0.3
+    for d in days_test + days_ctrl:
+        d["_band"] = band
+    roles = [("indoor", "Thermostat")] + [(r, names.get(r[5:], r[5:])) for r in sorted(series) if r.startswith("room:")]
+    rooms = []
+    for role, name in roles:
+        temps = series.get(role) or {}
+        t, c = _room_days(days_test, temps), _room_days(days_ctrl, temps)
+        if len(t) < 5 or len(c) < 3:
+            continue
+        cmp = _compare(t, c, metrics=("drift", "end_temp", "back_h"))
+        mean = lambda xs, k: sum(x[k] for x in xs) / len(xs)
+        prof = lambda xs: [_r(sum(x["path"][h] for x in xs if x["path"][h] is not None) /
+                              max(1, sum(1 for x in xs if x["path"][h] is not None)), 2)
+                           if any(x["path"][h] is not None for x in xs) else None for h in range(24)]
+        rooms.append({
+            "role": role, "name": name, "n_test": len(t), "n_ctrl": len(c),
+            "drift_test": _r(mean(t, "drift"), 2), "drift_ctrl": _r(mean(c, "drift"), 2),
+            "end_test": _r(mean(t, "end_temp"), 1), "end_ctrl": _r(mean(c, "end_temp"), 1),
+            "end_worst": _r(max(x["end_temp"] for x in t) if days_test and days_test[0]["mode"] == "cool" else min(x["end_temp"] for x in t), 1),
+            "back_test": _r(mean(t, "back_h"), 1), "back_ctrl": _r(mean(c, "back_h"), 1),
+            # _compare gives ctrl - test; flip so "extra" = what the setback ADDS
+            "extra_drift": _r(-cmp["drift"], 2) if cmp else None, "extra_drift_se": _r(cmp["drift_se"], 2) if cmp else None,
+            "extra_back_h": _r(-cmp["back_h"], 1) if cmp else None,
+            "profile_test": prof(t), "profile_ctrl": prof(c),
+        })
+    for d in days_test + days_ctrl:
+        d.pop("_band", None)
+    return rooms
+
+
+def tou_analysis(series, s, tou, model, now_ts, setpoints=None, min_days=5, names=None):
     """Everything for the Time of use section. ``setpoints`` = {"cool": {ts: value},
     "heat": {ts: value}} hourly means from the setpoint sensors."""
     if tou is None or model is None:
@@ -789,6 +849,7 @@ def tou_analysis(series, s, tou, model, now_ts, setpoints=None, min_days=5):
             c.update({"method": method, "verdict": verdict, "weekdays_per_year": per_year,
                       "per_year": sav * per_year, "per_year_se": se * per_year})
         compare[mode] = c or {"method": method, "verdict": "not enough data", "n_test": len(test), "n_ctrl": len(ctrl)}
+        compare[mode]["rooms"] = room_impact(series, test, ctrl, names or {}, s) if len(test) >= min_days and ctrl else []
         compare[mode]["labeled_setback"] = len(sb)
         compare[mode]["labeled_flat"] = len(fl)
         if test and ctrl:
@@ -801,7 +862,10 @@ def tou_analysis(series, s, tou, model, now_ts, setpoints=None, min_days=5):
         for k, v in list(c.items()):
             if isinstance(v, float):
                 c[k] = _r(v, 3)
+    recent_modes = [d["mode"] for d in days[-14:] if d["mode"]]
+    season = max(("cool", "heat"), key=lambda m: recent_modes.count(m)) if recent_modes else None
     return {
+        "season": season,
         "window": {"start": tou._fmt(tou.start), "end": tou._fmt(tou.end), "clock": tou.clock, "weekdays_only": tou.weekdays_only},
         "rates": {"peak": tou.peak_rate, "offpeak": tou.offpeak_rate, "spread": _r(spread, 4)},
         "since": tou.since.isoformat() if tou.since else None,

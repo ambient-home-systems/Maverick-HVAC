@@ -17,7 +17,9 @@ context, so adding a check never needs a `version` bump.
   across midnight), billed months from `tou_since`, and a KNOWN setback (35 % of
   peak energy cut, half of it back in the recovery) recovered both ways: weekdays
   vs weekends, and an alternate-week A/B labeled from synthetic setpoints. No
-  setback must give no verdict.
+  setback must give no verdict. The A/B house also warms one room 1.5 degrees by
+  the end of each setback peak; the room comparison must find it, and find
+  nothing in the room left alone.
 - `test_service.py` - every MQTT entity has a state key, the page's endpoints, and
   the page uses only relative URLs (ingress).
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+- **What the peak setback does to each room.** For the thermostat and every
+  configured room, per season: how far it moves from the hour before the peak to
+  the peak's end on setback days against comparison days in the same weather (the
+  setback's extra change, with its standard error), the temperature at the end of
+  the peak, the warmest (cooling) or coldest (heating) day, and how long until it
+  is back where it started. A chart of each room through the afternoon and
+  evening on setback days.
+- New entity **Peak setback, biggest room change** (the current season's room the
+  setback moves most) with every room's numbers in its attributes.
+
 ## 0.2.0
 
 - **Time of use.** HVAC energy and cost by peak / off-peak per month and for 30

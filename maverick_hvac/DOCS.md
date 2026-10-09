@@ -89,6 +89,13 @@ Which days count as setback days:
 - **Until then**, weekdays are compared with weekends (no peak). Who's home also
   differs between them, so treat that as a hint.
 
+**Rooms.** The same comparison for the thermostat and every configured room: how
+far each one moves during the peak on setback days compared with days without the
+setback (the extra change, ± its standard error), how warm or cold it is when the
+peak ends, the worst day, and how long until it is back where it started. That is
+the comfort side of the trade - a setback that saves little but leaves one bedroom
+3 °F warmer by bedtime is easy to judge.
+
 The clean answer is an **A/B test**: alternate weeks with and without the setback
 for 4-6 weeks per season. The page shows how many of each it has.
 
@@ -114,7 +121,8 @@ load, model fit, expected today / tomorrow, yesterday's actual / expected / inde
 30-day index, capacity limits, aux onset, aux share and hours, mild-weather aux
 hours, house time constant, last analysis, and a `problem` diagnostic. With a
 peak window: HVAC cost and peak share over 30 days, the shifting ceiling, and the
-peak setback's value ($ a day) and verdict for cooling and heating.
+peak setback's value ($ a day) and verdict for cooling and heating, and the
+biggest room change the setback causes (every room in its attributes).
 
 Without a broker, everything is still on the add-on's page.
 

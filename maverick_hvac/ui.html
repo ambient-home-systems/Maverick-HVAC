@@ -392,10 +392,70 @@ function touAB(t) {
     <p class="note">For a heat pump in heating, watch the recovery's aux hours: strips cost about three times as much per unit of heat, which can wipe out a peak saving.</p></div>`;
 }
 
+function touRooms(t, mode) {
+  const c = t.compare[mode] || {}, rooms = c.rooms || [], p = t.profiles[mode];
+  if (!rooms.length) return "";
+  const cool = mode === "cool", col = cool ? "var(--cool)" : "var(--heat)";
+  const names = c.method === "setpoints" ? ["setback days", "flat days"] : ["weekdays", "weekends"];
+  // 1) drift during the peak, per room: grouped bars (setback group vs comparison) with the extra as a label
+  const vals = rooms.flatMap((r) => [r.drift_test, r.drift_ctrl]);
+  const lim = Math.max(0.5, Math.ceil(Math.max(...vals.map(Math.abs)) * 2) / 2);
+  const f = frame({ x: [0, rooms.length], y: [-lim, lim], yLabel: `change during the peak (${U})`, xTicks: [], h: 260, yFmt: (v) => (v > 0 ? "+" : "") + v });
+  const gw = (f.w - f.m.l - f.m.r) / rooms.length, bw = Math.min(26, gw / 3);
+  let b = `<line x1="${f.m.l}" x2="${f.w - f.m.r}" y1="${f.Y(0)}" y2="${f.Y(0)}" stroke="var(--text-2)" opacity=".5"/>`;
+  rooms.forEach((r, i) => {
+    const cx = f.X(i) + gw / 2;
+    for (const [v, x0, fill] of [[r.drift_test, cx - bw - 1, col], [r.drift_ctrl, cx + 1, "var(--text-2)"]]) {
+      b += `<rect x="${x0}" y="${Math.min(f.Y(v), f.Y(0))}" width="${bw}" height="${Math.max(1, Math.abs(f.Y(v) - f.Y(0)))}" fill="${fill}" opacity=".8"
+        data-tip="${esc(r.name)}<br>${names[0]}: ${r.drift_test > 0 ? "+" : ""}${fmt(r.drift_test, 2)}${U} by the end of the peak<br>${names[1]}: ${r.drift_ctrl > 0 ? "+" : ""}${fmt(r.drift_ctrl, 2)}${U}"/>`;
+    }
+    const ex = r.extra_drift, sig = ex != null && Math.abs(ex) > 2 * (r.extra_drift_se || 0);
+    b += `<text x="${cx}" y="${f.h - f.m.b + 14}" text-anchor="middle">${esc(r.name.length > 12 ? r.name.slice(0, 11) + "…" : r.name)}</text>`;
+    if (ex != null) b += `<text x="${cx}" y="${f.h - f.m.b + 27}" text-anchor="middle" style="font-weight:${sig ? 700 : 400};fill:${sig ? col : "var(--text-2)"}">${ex > 0 ? "+" : ""}${fmt(ex, 1)}${sig ? "" : "?"}</text>`;
+  });
+  f.h += 10;
+  const bars = svg(f, b);
+  // 2) the table
+  const rows = rooms.map((r) => {
+    const sig = r.extra_drift != null && Math.abs(r.extra_drift) > 2 * (r.extra_drift_se || 0);
+    return `<tr><td>${esc(r.name)}</td><td class="num" style="${sig ? `color:${col};font-weight:700` : ""}">${r.extra_drift > 0 ? "+" : ""}${fmt(r.extra_drift, 2)}${U} <span class="sub">± ${fmt(r.extra_drift_se, 2)}</span></td>
+      <td class="num">${fmt(r.end_test, 1)}${U} <span class="sub">vs ${fmt(r.end_ctrl, 1)}</span></td><td class="num">${fmt(r.end_worst, 1)}${U}</td>
+      <td class="num">${r.back_test >= 7 ? "6+ h" : fmt(r.back_test, 1) + " h"} <span class="sub">vs ${r.back_ctrl >= 7 ? "6+" : fmt(r.back_ctrl, 1)}</span></td></tr>`;
+  }).join("");
+  // 3) the day, hour by hour, on setback days
+  let lines = "";
+  const palette = ["#868e96", "#e8590c", "#1c7ed6", "#2b8a3e", "#ae3ec9", "#f59f00", "#0c8599", "#e64980", "#5c7cfa"];
+  const all = rooms.flatMap((r) => r.profile_test.slice(12).filter((v) => v != null));
+  if (all.length && p) {
+    const g = frame({ x: [12, 23], y: [Math.floor(Math.min(...all)) - 0.5, Math.ceil(Math.max(...all)) + 0.5], xLabel: "Hour of day", yLabel: U, h: 240, xTicks: [12, 14, 16, 18, 20, 22], xFmt: hr12 });
+    const a = p.window[0], z = p.window[p.window.length - 1] + 1;
+    let gb = `<rect x="${g.X(a)}" y="${g.m.t}" width="${g.X(Math.min(23, z)) - g.X(a)}" height="${g.h - g.m.b - g.m.t}" fill="var(--heat)" opacity=".09"/><text x="${g.X(a) + 4}" y="${g.m.t + 12}">peak</text>`;
+    let lg = "";
+    rooms.forEach((r, i) => {
+      let path = "";
+      r.profile_test.forEach((v, h) => { if (h >= 12 && v != null) path += (path ? "L" : "M") + g.X(h).toFixed(1) + " " + g.Y(v).toFixed(1); });
+      const cc = palette[i % palette.length];
+      gb += `<path d="${path}" fill="none" stroke="${cc}" stroke-width="${i === 0 ? 3 : 2}" ${i === 0 ? 'stroke-dasharray="6 4"' : ""} data-tip="${esc(r.name)} on ${names[0]}"/>`;
+      lg += `<span><i style="background:${cc}"></i>${esc(r.name)}</span>`;
+    });
+    lines = `<p class="note" style="margin-top:12px">Average ${names[0]}, noon to midnight:</p><div class="legend">${lg}</div>${svg(g, gb)}`;
+  }
+  const note = c.method === "setpoints" ? `Setback days vs flat days, labeled from the thermostat's setpoint.`
+    : `Weekdays (setback) vs weekends (none) in the same weather, until the setpoint history has 5 labeled days of each - who's home differs too.`;
+  return `<div class="card s12"><h2>${cool ? "Cooling" : "Heating"}: what the peak setback does to each room</h2>
+    <div class="sub">Each room's change from the hour before the peak to its end, on ${names[0]} (color) and ${names[1]} (gray). The number under each room is the extra change the setback causes; "?" = within the noise. ${note}</div>
+    <div class="grid" style="margin-top:6px"><div class="s6" style="min-width:0">${bars}</div><div class="s6" style="min-width:0">
+      <table><tr><th>Room</th><th class="num">extra change</th><th class="num">at peak end</th><th class="num">${cool ? "warmest" : "coldest"} day</th><th class="num">back to start</th></tr>${rows}</table>
+      ${lines}</div></div></div>`;
+}
+
 function touSection(r) {
   const t = r.tou;
   if (!t) return "";
-  return touHeader(t) + touMonthly(t) + touAB(t).replace('class="card s12"', 'class="card s6"') + touProfile(t, "cool") + touProfile(t, "heat");
+  // the current season's rooms first
+  const order = t.season === "heat" ? ["heat", "cool"] : ["cool", "heat"];
+  return touHeader(t) + touMonthly(t) + touAB(t).replace('class="card s12"', 'class="card s6"') + touProfile(t, "cool") + touProfile(t, "heat") +
+    order.map((m) => touRooms(t, m)).join("");
 }
 
 function render(r) {
