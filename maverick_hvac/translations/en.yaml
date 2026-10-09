@@ -1,0 +1,42 @@
+configuration:
+  power_entity:
+    name: HVAC power sensor
+    description: Watts for the whole system (outdoor unit and air handler on one circuit, or a sensor that adds them). Needs long-term statistics (a state_class).
+  outdoor_temperature_entity:
+    name: Outdoor temperature sensor
+    description: A local outdoor sensor with long-term statistics. A weather-service temperature works but is less precise.
+  indoor_temperature_entity:
+    name: Indoor temperature sensor
+    description: The thermostat's temperature (the reference the rooms are compared with).
+  weather_entity:
+    name: Weather forecast
+    description: Hourly forecast for the "expected today / tomorrow" numbers. Optional.
+  compressor_duty_entity:
+    name: Compressor duty sensor
+    description: Optional 0-100 % sensor (100 while the compressor runs). With it, run time is measured instead of estimated from power.
+  temperature_unit:
+    name: Temperature unit
+    description: The unit every result is in. Statistics are converted to it.
+  aux_threshold_w:
+    name: Aux heat threshold (W)
+    description: An hour whose circuit peak passes this ran the electric strips. Set it above your system's maximum if it has no strips.
+  heat_pump_running_w:
+    name: Heat pump draw (W)
+    description: Typical draw while heating without strips. Only used to estimate aux energy (circuit minus this).
+  aux_mild_above:
+    name: Mild-weather aux above
+    description: Aux running above this outdoor temperature counts as probably avoidable. Default 40 °F / 4.5 °C.
+  model_days:
+    name: Model window (days)
+    description: Fit the model to the most recent N complete days. 365 covers both seasons.
+  history_days:
+    name: History to read (days)
+    description: How far back to read statistics. The monthly chart and capacity curves use all of it.
+  update_interval_minutes:
+    name: Re-run every (minutes)
+    description: Statistics are hourly, so more often than 60 rarely changes anything.
+  rooms:
+    name: Rooms
+    description: Room temperature sensors to compare with the thermostat (entity, optional name).
+  log_level:
+    name: Log level

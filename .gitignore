@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# real statistics or results exported while developing - never commit a house's data
+*.pkl
+results*.json
+data/

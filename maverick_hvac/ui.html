@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maverick HVAC</title>
+<!--
+  Maverick HVAC - the add-on page, served over Home Assistant ingress.
+  Single file, no external requests: charts are hand-drawn SVG. Every URL is
+  RELATIVE (ingress serves this page under a per-session path; a leading slash
+  would escape to Home Assistant's own API).
+-->
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1c1d21; --text-2: #6b7080; --line: #e3e5ea; --grid: #eceef2;
+    --heat: #e8590c; --heat-2: #f59f00; --cool: #1c7ed6; --aux: #e03131; --ok: #2b8a3e; --model: #5f3dc4;
+    --chip: #f1f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111318; --card: #1b1e25; --text: #e9ebf0; --text-2: #9aa0ae; --line: #2a2e38; --grid: #23272f;
+      --heat: #ff8a3d; --heat-2: #ffc046; --cool: #4dabf7; --aux: #ff6b6b; --ok: #51cf66; --model: #b197fc; --chip: #252933; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  h2 { font-size: 16px; margin: 0 0 2px; }
+  .sub { color: var(--text-2); font-size: 13px; }
+  .spacer { flex: 1; }
+  button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; }
+  button:disabled { opacity: .6; cursor: default; }
+  .banner { padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; background: color-mix(in srgb, var(--aux) 14%, var(--card)); border: 1px solid color-mix(in srgb, var(--aux) 40%, transparent); }
+  .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; min-width: 0; }
+  .s12 { grid-column: span 12; } .s8 { grid-column: span 8; } .s6 { grid-column: span 6; } .s4 { grid-column: span 4; } .s3 { grid-column: span 3; }
+  @media (max-width: 960px) { .s8, .s6, .s4 { grid-column: span 12; } .s3 { grid-column: span 6; } }
+  .kpi .v { font-size: 26px; font-weight: 700; line-height: 1.15; }
+  .kpi .l { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-2); }
+  .kpi .n { font-size: 12px; color: var(--text-2); }
+  svg { display: block; width: 100%; height: auto; overflow: visible; }
+  svg text { fill: var(--text-2); font-size: 11px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-2); margin: 6px 0 2px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--text-2); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  p.note { color: var(--text-2); font-size: 12.5px; margin: 8px 0 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  .tip { position: fixed; pointer-events: none; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); display: none; z-index: 10; white-space: nowrap; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Maverick HVAC</h1>
+      <div class="sub" id="stamp">Loading…</div>
+    </div>
+    <div class="spacer"></div>
+    <button id="refresh">Re-run analysis</button>
+  </header>
+  <div id="problem" class="banner" style="display:none"></div>
+  <div id="app" class="grid"></div>
+</main>
+<div class="tip" id="tip"></div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const esc = (v) => String(v == null ? "" : v).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = (v, d = 1) => (v == null || isNaN(v) ? "—" : Number(v).toFixed(d));
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+let U = "°F";
+
+// ---------------------------------------------------------------- tooltips
+const tip = $("#tip");
+document.addEventListener("mousemove", (e) => {
+  const t = e.target.closest && e.target.closest("[data-tip]");
+  if (!t) { tip.style.display = "none"; return; }
+  tip.innerHTML = t.getAttribute("data-tip");
+  tip.style.display = "block";
+  const w = tip.offsetWidth;
+  tip.style.left = Math.min(e.clientX + 12, window.innerWidth - w - 8) + "px";
+  tip.style.top = e.clientY + 14 + "px";
+});
+
+// ---------------------------------------------------------------- tiny SVG charting
+function niceTicks(lo, hi, n = 5) {
+  if (!(hi > lo)) { hi = lo + 1; }
+  const raw = (hi - lo) / n, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw) || raw;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+function frame({ w = 760, h = 300, x, y, xLabel = "", yLabel = "", xTicks, yTicks, xFmt = (v) => v, yFmt = (v) => v }) {
+  const m = { l: 52, r: 14, t: 10, b: 38 };
+  const X = (v) => m.l + ((v - x[0]) / (x[1] - x[0])) * (w - m.l - m.r);
+  const Y = (v) => h - m.b - ((v - y[0]) / (y[1] - y[0])) * (h - m.t - m.b);
+  let g = "";
+  for (const t of yTicks || niceTicks(y[0], y[1])) {
+    g += `<line x1="${m.l}" x2="${w - m.r}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--grid)"/>`;
+    g += `<text x="${m.l - 6}" y="${Y(t) + 4}" text-anchor="end">${yFmt(t)}</text>`;
+  }
+  for (const t of xTicks || niceTicks(x[0], x[1], 8)) {
+    g += `<text x="${X(t)}" y="${h - m.b + 15}" text-anchor="middle">${xFmt(t)}</text>`;
+  }
+  g += `<line x1="${m.l}" x2="${w - m.r}" y1="${h - m.b}" y2="${h - m.b}" stroke="var(--line)"/>`;
+  if (xLabel) g += `<text x="${(m.l + w - m.r) / 2}" y="${h - 4}" text-anchor="middle">${esc(xLabel)}</text>`;
+  if (yLabel) g += `<text transform="translate(12 ${(m.t + h - m.b) / 2}) rotate(-90)" text-anchor="middle">${esc(yLabel)}</text>`;
+  return { w, h, m, X, Y, g };
+}
+const svg = (f, body) => `<svg viewBox="0 0 ${f.w} ${f.h}" role="img">${f.g}${body}</svg>`;
+const extent = (a, pad = 0) => { const lo = Math.min(...a), hi = Math.max(...a); return [lo - pad, hi + pad]; };
+
+// ---------------------------------------------------------------- model helpers
+const deg = (t, b, heat) => (b == null ? 0 : heat ? Math.max(0, b - t) : Math.max(0, t - b));
+function flatDay(m, t) {
+  // expected kWh for a day held at t all day
+  if (!m) return null;
+  return m.base_kwh + (m.kwh_per_hdd || 0) * deg(t, m.heat_balance, true) +
+    (m.kwh_per_hdd_knee || 0) * deg(t, m.knee, true) + (m.kwh_per_cdd || 0) * deg(t, m.cool_balance, false);
+}
+
+// ---------------------------------------------------------------- sections
+function kpis(r) {
+  const h = r.headline, m = r.model || {};
+  const k = (label, value, note, color) =>
+    `<div class="card kpi s3"><div class="l">${label}</div><div class="v" style="color:${color || "inherit"}">${value}</div><div class="n">${note || "&nbsp;"}</div></div>`;
+  const idx = (v) => (v == null ? "var(--text)" : v > 110 ? "var(--aux)" : v > 102 ? "var(--heat-2)" : "var(--ok)");
+  return [
+    k("Expected today", `${fmt(h.expected_today)} kWh`, `tomorrow ${fmt(h.expected_tomorrow)} kWh`),
+    k("Yesterday", `${fmt(h.yesterday_actual)} kWh`, h.yesterday_index != null ? `${fmt(h.yesterday_index, 0)} % of the ${fmt(h.yesterday_expected)} kWh expected` : "no complete day", idx(h.yesterday_index)),
+    k("Last 30 days", h.recent_index != null ? `${fmt(h.recent_index, 0)} %` : "—", `${fmt(h.recent_actual, 0)} kWh used, ${fmt(h.recent_expected, 0)} expected`, idx(h.recent_index)),
+    k("Model fit", m.r2 != null ? `R² ${fmt(m.r2, 2)}` : "—", m.n_days ? `${m.n_days} days, ±${fmt(m.rmse)} kWh a day` : ""),
+    k("Heating starts", m.heat_balance != null ? `${fmt(m.heat_balance, 0)}${U}` : "—", m.kwh_per_hdd ? `${fmt(m.kwh_per_hdd, 2)} kWh per degree-day` : ""),
+    k("Cold knee", m.knee != null ? `${fmt(m.knee, 0)}${U}` : "none", m.knee != null ? `below it ${fmt((m.kwh_per_hdd || 0) + (m.kwh_per_hdd_knee || 0), 2)} kWh per degree-day` : "cost per degree stays flat"),
+    k("Cooling starts", m.cool_balance != null ? `${fmt(m.cool_balance, 0)}${U}` : "—", m.kwh_per_cdd ? `${fmt(m.kwh_per_cdd, 2)} kWh per degree-day` : ""),
+    k("Aux heat", h.aux_share_year != null ? `${fmt(h.aux_share_year, 1)} %` : "—", `of heating energy, 12 months · onset ${h.aux_onset_temp != null ? fmt(h.aux_onset_temp, 0) + U : "—"}`, h.aux_share_year > 15 ? "var(--aux)" : null),
+  ].join("");
+}
+
+function signature(r) {
+  const m = r.model, d = r.daily.filter((x) => x.kwh != null && x.t_mean != null);
+  if (!d.length) return "";
+  const xs = d.map((x) => x.t_mean), ys = d.map((x) => x.kwh);
+  const x = extent(xs, 3), y = [0, Math.max(...ys) * 1.08];
+  const f = frame({ x, y, xLabel: `Daily mean outdoor temperature (${U})`, yLabel: "kWh / day", h: 330 });
+  let b = "";
+  if (m) {
+    let p = "";
+    for (let t = x[0]; t <= x[1]; t += 0.5) p += (p ? "L" : "M") + f.X(t).toFixed(1) + " " + f.Y(Math.min(y[1], flatDay(m, t))).toFixed(1);
+    b += `<path d="${p}" fill="none" stroke="var(--model)" stroke-width="2.5" opacity=".85"/>`;
+    for (const [t, lbl] of [[m.heat_balance, "heating"], [m.knee, "knee"], [m.cool_balance, "cooling"]]) {
+      if (t == null) continue;
+      b += `<line x1="${f.X(t)}" x2="${f.X(t)}" y1="${f.m.t}" y2="${f.h - f.m.b}" stroke="var(--model)" stroke-dasharray="3 4" opacity=".55"/>`;
+      b += `<text x="${f.X(t) + 4}" y="${f.m.t + 12}">${lbl} ${fmt(t, 0)}${U}</text>`;
+    }
+  }
+  for (const p of d) {
+    const c = p.aux_hours > 0 ? "var(--aux)" : p.mode === "heat" ? "var(--heat)" : p.mode === "cool" ? "var(--cool)" : "var(--text-2)";
+    b += `<circle cx="${f.X(p.t_mean).toFixed(1)}" cy="${f.Y(p.kwh).toFixed(1)}" r="${p.aux_hours > 0 ? 4 : 3}" fill="${c}" opacity=".7"
+      data-tip="${p.date}<br>${fmt(p.kwh)} kWh · expected ${fmt(p.expected)}<br>mean ${fmt(p.t_mean)}${U} (${fmt(p.t_min, 0)}–${fmt(p.t_max, 0)})${p.aux_hours ? `<br>aux ${p.aux_hours} h, ~${fmt(p.aux_kwh)} kWh` : ""}"/>`;
+  }
+  return `<div class="card s8"><h2>Energy signature</h2><div class="sub">Every day's HVAC energy against its outdoor temperature, with the fitted model. A point above the line used more than the weather explains.</div>
+    <div class="legend"><span><i style="background:var(--heat)"></i>heating day</span><span><i style="background:var(--cool)"></i>cooling day</span><span><i style="background:var(--aux)"></i>ran aux heat</span><span><i style="background:var(--model)"></i>model (a day held at that temperature)</span></div>
+    ${svg(f, b)}</div>`;
+}
+
+function modelCard(r) {
+  const m = r.model, c = r.coverage;
+  if (!m) return `<div class="card s4"><h2>Model</h2><p class="note">Not enough complete days yet (needs 30).</p></div>`;
+  const eq = [`${fmt(m.base_kwh, 2)}`];
+  if (m.heat_balance != null) eq.push(`${fmt(m.kwh_per_hdd, 2)} × HDD(${fmt(m.heat_balance, 0)}${U})`);
+  if (m.knee != null) eq.push(`${fmt(m.kwh_per_hdd_knee, 2)} × HDD(${fmt(m.knee, 0)}${U})`);
+  if (m.cool_balance != null) eq.push(`${fmt(m.kwh_per_cdd, 2)} × CDD(${fmt(m.cool_balance, 0)}${U})`);
+  const gaps = (c.gaps || []).map((g) => `<span class="chip">${g.from} → ${g.to} (${g.days} d)</span>`).join("");
+  return `<div class="card s4"><h2>Model</h2>
+    <div class="sub">kWh a day =</div><div style="font-family:ui-monospace,monospace;font-size:13px;margin:4px 0 10px">${eq.join("<br>+ ")}</div>
+    <table>
+      <tr><td>Trained on</td><td class="num">${m.n_days} days, ${m.from} → ${m.to}</td></tr>
+      <tr><td>R² / CV(RMSE)</td><td class="num">${fmt(m.r2, 3)} / ${fmt(100 * m.cv_rmse, 1)} %</td></tr>
+      <tr><td>Typical miss</td><td class="num">±${fmt(m.rmse)} kWh a day</td></tr>
+      <tr><td>Heat pump draw</td><td class="num">${fmt(r.running.running_heat_w, 0)} W heating · ${fmt(r.running.running_cool_w, 0)} W cooling</td></tr>
+      <tr><td>Data</td><td class="num">${c.complete_days} complete days of ${c.days} (${c.first} → ${c.last})</td></tr>
+    </table>
+    ${m.outliers && m.outliers.length ? `<p class="note">Left out as outliers: ${m.outliers.map(esc).join(", ")}</p>` : ""}
+    ${gaps ? `<p class="note">Gaps in the data:</p><div class="chips">${gaps}</div>` : ""}
+    <p class="note">Degree-days come from all 24 hourly outdoor readings. The cold knee is a second, steeper heating slope below a lower temperature: aux strips and the heat pump's falling efficiency in deep cold.</p></div>`;
+}
+
+function recentBars(r) {
+  const d = r.daily.slice(-90);
+  if (!d.length) return "";
+  const y = [0, Math.max(...d.map((x) => Math.max(x.kwh || 0, x.expected || 0))) * 1.1];
+  const f = frame({ x: [0, d.length], y, yLabel: "kWh / day", xTicks: [], h: 260 });
+  const bw = (f.w - f.m.l - f.m.r) / d.length;
+  let b = "", line = "";
+  d.forEach((p, i) => {
+    const x0 = f.X(i) + 1, w = Math.max(1, bw - 2);
+    const hp = Math.max(0, (p.kwh || 0) - (p.aux_kwh || 0));
+    const over = p.expected ? p.kwh / p.expected : 1;
+    const tipTxt = `${p.date}<br>${fmt(p.kwh)} kWh · expected ${fmt(p.expected)} (${fmt(100 * over, 0)} %)<br>mean ${fmt(p.t_mean)}${U}${p.aux_kwh ? `<br>aux ~${fmt(p.aux_kwh)} kWh` : ""}`;
+    b += `<rect x="${x0}" y="${f.Y(hp)}" width="${w}" height="${f.Y(0) - f.Y(hp)}" fill="${p.mode === "cool" ? "var(--cool)" : "var(--heat)"}" opacity=".75" data-tip="${tipTxt}"/>`;
+    if (p.aux_kwh) b += `<rect x="${x0}" y="${f.Y(p.kwh)}" width="${w}" height="${f.Y(hp) - f.Y(p.kwh)}" fill="var(--aux)" opacity=".85" data-tip="${tipTxt}"/>`;
+    if (p.expected != null) line += (line ? "L" : "M") + (x0 + w / 2).toFixed(1) + " " + f.Y(p.expected).toFixed(1);
+    if (i % 14 === 0) b += `<text x="${x0}" y="${f.h - f.m.b + 15}">${p.date.slice(5)}</text>`;
+  });
+  b += `<path d="${line}" fill="none" stroke="var(--model)" stroke-width="2"/>`;
+  return `<div class="card s12"><h2>Actual vs expected, last 90 days</h2><div class="sub">Bars are what the system used; the line is what the model expected for that day's weather.</div>
+    <div class="legend"><span><i style="background:var(--heat)"></i>heating</span><span><i style="background:var(--cool)"></i>cooling</span><span><i style="background:var(--aux)"></i>aux (estimate)</span><span><i style="background:var(--model)"></i>expected</span></div>${svg(f, b)}</div>`;
+}
+
+function monthly(r) {
+  const d = r.monthly.filter((x) => x.index != null);
+  if (!d.length) return "";
+  const vals = d.map((x) => x.index);
+  const y = [Math.min(70, Math.floor(Math.min(...vals) / 10) * 10), Math.max(130, Math.ceil(Math.max(...vals) / 10) * 10)];
+  const f = frame({ x: [0, d.length], y, yLabel: "% of expected", xTicks: [], h: 250, yFmt: (v) => v + "%" });
+  const bw = (f.w - f.m.l - f.m.r) / d.length;
+  let b = `<line x1="${f.m.l}" x2="${f.w - f.m.r}" y1="${f.Y(100)}" y2="${f.Y(100)}" stroke="var(--model)" stroke-dasharray="4 4"/>`;
+  d.forEach((p, i) => {
+    const x0 = f.X(i) + 3, w = Math.max(2, bw - 6), c = p.index > 110 ? "var(--aux)" : p.index > 102 ? "var(--heat-2)" : "var(--ok)";
+    const top = Math.min(f.Y(p.index), f.Y(100)), hgt = Math.abs(f.Y(p.index) - f.Y(100));
+    b += `<rect x="${x0}" y="${top}" width="${w}" height="${Math.max(1, hgt)}" fill="${c}" opacity=".8" rx="2"
+      data-tip="${p.month}: ${fmt(p.index, 1)} %<br>${fmt(p.actual, 0)} kWh used · ${fmt(p.expected, 0)} expected<br>${p.days} days${p.aux_kwh ? ` · aux ~${fmt(p.aux_kwh, 0)} kWh` : ""}"/>`;
+    b += `<text x="${x0 + w / 2}" y="${f.h - f.m.b + 15}" text-anchor="middle">${p.month.slice(2)}</text>`;
+  });
+  return `<div class="card s6"><h2>Efficiency index by month</h2><div class="sub">Energy used ÷ energy the model expects for that month's weather. 100 % = typical for this house; a rising trend is worth a look (filter, refrigerant, duct leak, settings).</div>${svg(f, b)}</div>`;
+}
+
+function dutyChart(r) {
+  const d = r.duty_curve;
+  if (!d.length) return "";
+  const x = extent(d.map((p) => p.t), 2), f = frame({ x, y: [0, 1], xLabel: `Outdoor temperature (${U})`, yLabel: "share of the hour running", h: 250, yFmt: (v) => Math.round(v * 100) + "%" });
+  const bw = Math.max(2, f.X(x[0] + 2) - f.X(x[0]) - 2);
+  let b = "";
+  for (const p of d) {
+    const c = p.heat ? "var(--heat)" : "var(--cool)";
+    b += `<rect x="${f.X(p.t) - bw / 2}" y="${f.Y(p.duty)}" width="${bw}" height="${f.Y(0) - f.Y(p.duty)}" fill="${c}" opacity=".7"
+      data-tip="${fmt(p.t, 0)}${U}: running ${fmt(100 * p.duty, 0)} % of the time<br>${p.n} hours${p.aux_frac ? ` · aux in ${fmt(100 * p.aux_frac, 0)} %` : ""}"/>`;
+    if (p.aux_frac > 0) b += `<rect x="${f.X(p.t) - bw / 2}" y="${f.Y(p.aux_frac)}" width="${bw}" height="${f.Y(0) - f.Y(p.aux_frac)}" fill="var(--aux)" opacity=".85"/>`;
+  }
+  for (const [k, c] of [["heat", "var(--heat)"], ["cool", "var(--cool)"]]) {
+    const cp = r.capacity[k];
+    if (!cp) continue;
+    // the fitted line from where it says 0 % to where it says 100 %, clipped to the chart
+    const t0 = (0 - cp.intercept) / cp.slope, t1 = cp.t100;
+    const a = Math.max(x[0], Math.min(t0, t1)), z = Math.min(x[1], Math.max(t0, t1));
+    if (!(z > a)) continue;
+    const yv = (t) => Math.max(0, Math.min(1, cp.intercept + cp.slope * t));
+    b += `<line x1="${f.X(a)}" x2="${f.X(z)}" y1="${f.Y(yv(a))}" y2="${f.Y(yv(z))}" stroke="${c}" stroke-width="2" stroke-dasharray="5 4"/>`;
+    if (cp.t100 >= x[0] && cp.t100 <= x[1]) b += `<text x="${f.X(cp.t100)}" y="${f.Y(1) - 2}" text-anchor="middle">100 % at ${fmt(cp.t100, 0)}${U}</text>`;
+  }
+  const h = r.headline;
+  return `<div class="card s6"><h2>Run time vs outdoor temperature</h2><div class="sub">How hard the system works at each outdoor temperature (hourly). Dashed: the trend, and where it reaches 100 % - the heat pump's capacity limit.</div>
+    <div class="legend"><span><i style="background:var(--heat)"></i>heating</span><span><i style="background:var(--cool)"></i>cooling</span><span><i style="background:var(--aux)"></i>hours with aux</span></div>${svg(f, b)}
+    <p class="note">Heat pump alone reaches full output near <b>${h.heat_capacity_temp != null ? fmt(h.heat_capacity_temp, 0) + U : "—"}</b>; cooling near <b>${h.cool_capacity_temp != null ? fmt(h.cool_capacity_temp, 0) + U : "—"}</b>. ${r.coverage.measured_duty_hours ? `${r.coverage.measured_duty_hours} hours use the measured compressor duty; the rest are estimated from power.` : "Run time is estimated from power (median running draw), so blower-only ventilation reads as a little run time."}</p></div>`;
+}
+
+function auxCard(r) {
+  const a = r.aux, ev = a.mild_events || [];
+  const rows = ev.slice(0, 10).map((e) => `<tr><td>${new Date(e.ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric" })}</td><td class="num">${fmt(e.t, 0)}${U}</td><td class="num">${fmt(e.peak_w / 1000, 1)} kW</td><td class="num">${fmt(e.aux_kwh, 2)}</td></tr>`).join("");
+  return `<div class="card s6"><h2>Aux heat</h2><div class="sub">Electric strips, read from the circuit: any hour peaking above the aux threshold. Energy is an estimate (the circuit minus a typical heat pump draw).</div>
+    <table style="margin-top:8px">
+      <tr><th></th><th class="num">30 days</th><th class="num">12 months</th></tr>
+      <tr><td>Aux hours</td><td class="num">${a.recent.aux_hours}</td><td class="num">${a.year.aux_hours}</td></tr>
+      <tr><td>Aux energy (est.)</td><td class="num">${fmt(a.recent.aux_kwh, 0)} kWh</td><td class="num">${fmt(a.year.aux_kwh, 0)} kWh</td></tr>
+      <tr><td>Share of heating energy</td><td class="num">${a.recent.aux_share != null ? fmt(100 * a.recent.aux_share, 1) + " %" : "—"}</td><td class="num">${a.year.aux_share != null ? fmt(100 * a.year.aux_share, 1) + " %" : "—"}</td></tr>
+      <tr><td>Aux above ${fmt(a.mild_above, 0)}${U} (likely avoidable)</td><td class="num">${a.recent.mild_hours} h</td><td class="num">${a.year.mild_hours} h · ${fmt(a.year.mild_kwh, 1)} kWh</td></tr>
+    </table>
+    <p class="note">Aux starts showing up below about <b>${a.onset != null ? fmt(a.onset, 0) + U : "—"}</b> (the warmest temperature where 1 in 10 hours ran it). Aux in mild weather usually means a recovery from a setback - a smaller setback or the thermostat's aux lockout temperature fixes it.</p>
+    ${rows ? `<table style="margin-top:8px"><tr><th>Recent mild-weather aux</th><th class="num">outdoor</th><th class="num">peak</th><th class="num">kWh</th></tr>${rows}</table>` : ""}</div>`;
+}
+
+function roomsChart(r) {
+  const rs = r.rooms;
+  if (!rs.length) return `<div class="card s6"><h2>Rooms</h2><p class="note">Add rooms in the add-on configuration to compare each one with the thermostat.</p></div>`;
+  const palette = ["#e8590c", "#1c7ed6", "#2b8a3e", "#ae3ec9", "#f59f00", "#0c8599", "#e64980", "#5c7cfa", "#868e96", "#94d82d"];
+  const all = rs.flatMap((x) => x.by_hour.filter((v) => v != null));
+  const lim = Math.max(1, Math.ceil(Math.max(...all.map(Math.abs))));
+  const f = frame({ x: [0, 23], y: [-lim, lim], xLabel: "Hour of day", yLabel: `vs thermostat (${U})`, h: 270, xTicks: [0, 3, 6, 9, 12, 15, 18, 21], xFmt: (v) => (v === 0 ? "12a" : v < 12 ? v + "a" : v === 12 ? "12p" : v - 12 + "p") });
+  let b = `<line x1="${f.m.l}" x2="${f.w - f.m.r}" y1="${f.Y(0)}" y2="${f.Y(0)}" stroke="var(--text-2)" opacity=".5"/>`, lg = "";
+  rs.forEach((room, i) => {
+    const c = palette[i % palette.length];
+    let p = "";
+    room.by_hour.forEach((v, hr) => { if (v != null) p += (p ? "L" : "M") + f.X(hr).toFixed(1) + " " + f.Y(v).toFixed(1); });
+    b += `<path d="${p}" fill="none" stroke="${c}" stroke-width="2" data-tip="${esc(room.name)}: ${room.mean > 0 ? "+" : ""}${fmt(room.mean)}${U} on average, swings ${fmt(room.swing)}${U} over the day"/>`;
+    lg += `<span><i style="background:${c}"></i>${esc(room.name)} ${room.mean > 0 ? "+" : ""}${fmt(room.mean)}</span>`;
+  });
+  return `<div class="card s6"><h2>Rooms vs the thermostat</h2><div class="sub">Each room's temperature minus the thermostat's, by hour of day, last ${r.options && r.options.room_days || 30} days. Afternoon bumps are usually sun; a room that sits below all day is a duct or insulation question.</div>
+    <div class="legend">${lg}</div>${svg(f, b)}</div>`;
+}
+
+function coastCard(r) {
+  const c = r.coast;
+  if (!c || !c.tau_h) return `<div class="card s6"><h2>House time constant</h2><p class="note">Needs at least 40 night hours with the system off and a real indoor-outdoor difference (${c ? c.n : 0} so far).</p></div>`;
+  const pts = c.points || [], x = extent(pts.map((p) => p[0]), 2), y = extent(pts.map((p) => p[1]), 0.2);
+  const f = frame({ x, y, xLabel: `Indoor − outdoor (${U})`, yLabel: `indoor change per hour (${U})`, h: 250 });
+  let b = "";
+  for (const p of pts) b += `<circle cx="${f.X(p[0]).toFixed(1)}" cy="${f.Y(p[1]).toFixed(1)}" r="2" fill="var(--cool)" opacity=".35"/>`;
+  b += `<line x1="${f.X(x[0])}" x2="${f.X(x[1])}" y1="${f.Y(-c.k * x[0])}" y2="${f.Y(-c.k * x[1])}" stroke="var(--model)" stroke-width="2.5"/>`;
+  const per = c.k * (U === "°F" ? 30 : 17);
+  return `<div class="card s6"><h2>House time constant</h2><div class="sub">With the system off at night, how fast the house drifts toward the outdoor temperature.</div>${svg(f, b)}
+    <p class="note"><b>${fmt(c.tau_h, 0)} hours</b> from ${c.n} night hours: with ${U === "°F" ? "30" : "17"}${U} between inside and out, the house moves about ${fmt(per, 2)}${U} an hour. Larger is a tighter, better-insulated house. Thermostat readings in whole degrees make single hours noisy; the trend across seasons is the useful part.</p></div>`;
+}
+
+function render(r) {
+  U = r.unit === "C" ? "°C" : "°F";
+  $("#app").innerHTML = kpis(r) + signature(r) + modelCard(r) + recentBars(r) + monthly(r) + dutyChart(r) + auxCard(r) + roomsChart(r) + coastCard(r);
+  const g = new Date(r.generated);
+  $("#stamp").textContent = `Analysis from ${g.toLocaleString()} · ${r.coverage.complete_days} complete days · ${r.elapsed_s ?? "?"} s`;
+}
+
+async function load() {
+  try {
+    const j = await (await fetch("results", { cache: "no-store" })).json();
+    $("#problem").style.display = j.problem ? "block" : "none";
+    $("#problem").textContent = j.problem || "";
+    $("#refresh").disabled = !!j.running;
+    $("#refresh").textContent = j.running ? "Analyzing…" : "Re-run analysis";
+    if (j.results) render(j.results);
+    else $("#stamp").textContent = j.running ? "First analysis running…" : "No results yet.";
+    return j;
+  } catch (e) {
+    $("#stamp").textContent = "Could not reach the add-on: " + e;
+  }
+}
+$("#refresh").addEventListener("click", async () => {
+  $("#refresh").disabled = true;
+  $("#refresh").textContent = "Analyzing…";
+  await fetch("refresh", { method: "POST" });
+  const t0 = Date.now();
+  const poll = async () => { const j = await load(); if ((j && j.running) || Date.now() - t0 < 2500) setTimeout(poll, 1500); };
+  setTimeout(poll, 1500);
+});
+load();
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

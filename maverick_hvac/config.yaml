@@ -1,0 +1,56 @@
+name: Maverick HVAC
+version: "0.1.0"
+slug: maverick_hvac
+description: Heat pump and HVAC efficiency analysis from Home Assistant's long-term statistics
+url: https://github.com/ambient-home-systems/Maverick-HVAC
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+# Reads statistics, the time zone and the weather forecast over Home Assistant's
+# websocket API.
+homeassistant_api: true
+hassio_api: false
+# The results page. Home Assistant handles the auth and proxies it; nothing
+# listens outside. Keep in step with INGRESS_PORT in maverick.py.
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:hvac
+panel_title: Maverick HVAC
+startup: application
+boot: auto
+# Entities go out over MQTT discovery when a broker exists; without one the
+# results are still on the page.
+services:
+  - mqtt:want
+options:
+  power_entity: "sensor.hvac_power"
+  outdoor_temperature_entity: "sensor.outdoor_temperature"
+  indoor_temperature_entity: "sensor.thermostat_temperature"
+  weather_entity: "weather.forecast_home"
+  temperature_unit: F
+  aux_threshold_w: 5000
+  heat_pump_running_w: 3500
+  model_days: 365
+  history_days: 730
+  update_interval_minutes: 60
+  rooms: []
+  log_level: info
+schema:
+  power_entity: match(^sensor\.[a-z0-9_]+$)
+  outdoor_temperature_entity: match(^sensor\.[a-z0-9_]+$)
+  indoor_temperature_entity: match(^sensor\.[a-z0-9_]+$)
+  weather_entity: match(^weather\.[a-z0-9_]+$)?
+  compressor_duty_entity: match(^sensor\.[a-z0-9_]+$)?
+  temperature_unit: list(F|C)
+  aux_threshold_w: int(500,100000)
+  heat_pump_running_w: int(100,30000)
+  aux_mild_above: float?
+  model_days: int(60,1095)
+  history_days: int(60,3650)
+  update_interval_minutes: int(5,1440)
+  rooms:
+    - entity: match(^sensor\.[a-z0-9_]+$)
+      name: str?
+  log_level: list(debug|info|warning|error)
