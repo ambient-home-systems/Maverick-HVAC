@@ -66,8 +66,8 @@ useful as a trend.
 ## Entities
 
 With an MQTT broker (the Mosquitto add-on), the headline numbers appear as
-entities on a **Maverick HVAC** device: balance points, slopes, base load, model
-fit, expected today / tomorrow, yesterday's actual / expected / index, the
+entities on a **Maverick HVAC** device: balance points, cold knee, slopes, base
+load, model fit, expected today / tomorrow, yesterday's actual / expected / index, the
 30-day index, capacity limits, aux onset, aux share and hours, mild-weather aux
 hours, house time constant, last analysis, and a `problem` diagnostic.
 

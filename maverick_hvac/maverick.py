@@ -40,6 +40,8 @@ ENTITIES = [
     ("heat_balance", "Heating balance point", "T", "temperature", "measurement", "mdi:thermometer-chevron-down"),
     ("cool_balance", "Cooling balance point", "T", "temperature", "measurement", "mdi:thermometer-chevron-up"),
     ("kwh_per_hdd", "Energy per heating degree-day", "kWh", None, "measurement", "mdi:snowflake-thermometer"),
+    ("knee", "Cold knee", "T", "temperature", "measurement", "mdi:thermometer-low"),
+    ("kwh_per_hdd_knee", "Extra energy per degree-day below the knee", "kWh", None, "measurement", "mdi:snowflake-alert"),
     ("kwh_per_cdd", "Energy per cooling degree-day", "kWh", None, "measurement", "mdi:sun-thermometer"),
     ("base_kwh", "Base load", "kWh", None, "measurement", "mdi:power-plug-outline"),
     ("model_fit", "Model fit", "%", None, "measurement", "mdi:chart-bell-curve-cumulative"),
@@ -222,6 +224,7 @@ def headline_state(res, problem):
     h.update({
         "heat_balance": m.get("heat_balance"), "cool_balance": m.get("cool_balance"),
         "kwh_per_hdd": m.get("kwh_per_hdd"), "kwh_per_cdd": m.get("kwh_per_cdd"), "base_kwh": m.get("base_kwh"),
+        "knee": m.get("knee"), "kwh_per_hdd_knee": m.get("kwh_per_hdd_knee"),
         "model_fit": round(100 * m["r2"], 1) if m.get("r2") is not None else None,
         "time_constant": round(res["coast"]["tau_h"], 1) if res and (res.get("coast") or {}).get("tau_h") else None,
         "last_analysis": (res or {}).get("generated"),
