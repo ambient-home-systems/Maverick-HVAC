@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+- **Time of use.** HVAC energy and cost by peak / off-peak per month and for 30
+  days; the most that shifting every peak kWh could save; and, per season,
+  whether a peak setback pays - setback days against flat days in the same
+  weather (cost, energy, peak energy, recovery, aux in the recovery), with a
+  verdict. Days are labeled from new optional setpoint sensors; until there are
+  enough, weekends stand in. Supports peaks defined in standard time that move
+  with daylight saving, rates read from entities, and a billing start date.
+- Seven new entities when a peak window is set (cost, peak share, ceiling,
+  setback value and verdict for cooling and heating).
+
 ## 0.1.1
 
 - Two new entities: **Cold knee** (the temperature below which heating gets

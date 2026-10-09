@@ -8,8 +8,9 @@ sys.path[:0] = [HERE, os.path.join(HERE, "..", "maverick_hvac")]
 
 import test_analysis  # noqa: E402
 import test_service  # noqa: E402
+import test_tou  # noqa: E402
 
-fails = test_analysis.run() + test_service.run()
+fails = test_analysis.run() + test_service.run() + test_tou.run()
 print()
 print("ALL PASSED" if not fails else f"{len(fails)} FAILED: {', '.join(fails)}")
 sys.exit(1 if fails else 0)

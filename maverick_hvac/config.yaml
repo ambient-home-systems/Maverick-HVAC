@@ -1,5 +1,5 @@
 name: Maverick HVAC
-version: "0.1.1"
+version: "0.2.0"
 slug: maverick_hvac
 description: Heat pump and HVAC efficiency analysis from Home Assistant's long-term statistics
 url: https://github.com/ambient-home-systems/Maverick-HVAC
@@ -53,4 +53,16 @@ schema:
   rooms:
     - entity: match(^sensor\.[a-z0-9_]+$)
       name: str?
+  heat_setpoint_entity: match(^sensor\.[a-z0-9_]+$)?
+  cool_setpoint_entity: match(^sensor\.[a-z0-9_]+$)?
+  tou_peak_start: match(^([01]?[0-9]|2[0-3]):[0-5][0-9]$)?
+  tou_peak_end: match(^([01]?[0-9]|2[0-4]):[0-5][0-9]$)?
+  tou_weekdays_only: bool?
+  tou_clock: list(local|standard)?
+  tou_peak_rate: float(0,10)?
+  tou_offpeak_rate: float(0,10)?
+  tou_peak_rate_entity: match(^(input_number|sensor|number)\.[a-z0-9_]+$)?
+  tou_offpeak_rate_entity: match(^(input_number|sensor|number)\.[a-z0-9_]+$)?
+  tou_since: match(^\d{4}-\d{2}-\d{2}$)?
+  currency: str?
   log_level: list(debug|info|warning|error)

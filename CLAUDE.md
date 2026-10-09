@@ -52,6 +52,18 @@ heat pump efficiency analysis from Home Assistant's long-term statistics.
 - **Run time is estimated from power unless a duty sensor exists**: (mean - idle)
   / (running - idle), with running = the median hourly peak on clearly-heating or
   clearly-cooling hours, measured from the data.
+- **TOU comparisons are weather-matched by the model's expected kWh**, binned
+  into quartiles, differences taken inside bins and combined with weights
+  n1·n2/(n1+n2); a verdict needs |difference| > 2 SE. Every day is priced at
+  today's rates as if it had a peak (so weekends compare); billed cost uses the
+  real calendar and starts at `tou_since`.
+- **Setback days are labeled from the setpoint the thermostat used** (peak-window
+  mean vs the 3 hours before, in the saving direction), not from the calendar.
+  Weekdays vs weekends is only the fallback - occupancy differs between them.
+  The labeled comparison takes over at 5 + 5 days per season.
+- **A standard-time peak** (`tou_clock: standard`) is one real-world window: its
+  clock hours move an hour later during daylight saving. Several utilities
+  define peaks that way.
 - **Balance point vs base load trade off** in any such fit; tests hold
   predictions tight and parameters loosely (tests/README.md).
 
