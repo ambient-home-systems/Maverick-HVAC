@@ -485,9 +485,11 @@ def rooms(series, s, names, now_ts):
 # Everything
 # ----------------------------------------------------------------------------
 
-def analyze(series, s, now_ts, names=None, forecast=None):
+def analyze(series, s, now_ts, names=None, forecast=None, tou=None, setpoints=None):
     """Run every analysis. ``forecast`` = {"today": [temps for the remaining hours],
-    "tomorrow": [24 temps]}; today's past hours come from the outdoor series."""
+    "tomorrow": [24 temps]}; today's past hours come from the outdoor series.
+    ``tou`` = a TOU (or None to skip that section); ``setpoints`` = {"cool": {ts: v},
+    "heat": {ts: v}} hourly setpoint means, which label setback days."""
     days = build_days(series, s)
     model = fit_model(days, s)
     hours, run = hourly(series, s, model)
@@ -565,4 +567,245 @@ def analyze(series, s, now_ts, names=None, forecast=None):
                 "mild_events": aux["mild_events"]},
         "coast": coast(series, s),
         "rooms": rooms(series, s, names or {}, now_ts),
+        "tou": tou_analysis(series, s, tou, model, now_ts, setpoints),
+    }
+
+
+# ----------------------------------------------------------------------------
+# Time of use: what the peak window costs, and whether a peak setback pays
+# ----------------------------------------------------------------------------
+
+class TOU:
+    """A weekday (or every-day) peak window with two rates.
+
+    ``clock="standard"`` means the window is defined in STANDARD time, so during
+    daylight saving the clock hours move one later (a utility whose peak is the
+    same real-world window all year: 3-8 PM EST = 4-9 PM EDT). Hours are whole:
+    an hour of statistics is peak when its start is inside the window."""
+
+    def __init__(self, start, end, weekdays_only=True, clock="local", peak_rate=0.0, offpeak_rate=0.0, since=None):
+        self.start, self.end = _hm(start), _hm(end)
+        self.weekdays_only, self.clock = weekdays_only, clock
+        self.peak_rate, self.offpeak_rate = float(peak_rate or 0), float(offpeak_rate or 0)
+        self.since = since  # date TOU billing began, or None
+
+    def has_peak(self, d):
+        return not (self.weekdays_only and d.weekday() >= 5)
+
+    def is_peak(self, dt):
+        """dt: an aware local datetime (the start of an hour)."""
+        if not self.has_peak(dt.date()):
+            return False
+        h = dt.hour + dt.minute / 60.0
+        if self.clock == "standard" and dt.dst() and dt.dst().total_seconds() > 0:
+            h -= 1.0
+            h %= 24
+        if self.start <= self.end:
+            return self.start <= h < self.end
+        return h >= self.start or h < self.end
+
+    def window_hours(self, d, tz):
+        """Local clock hours (0-23) that are peak on date d, as if it had a peak."""
+        out = []
+        for hr in range(24):
+            dt = datetime(d.year, d.month, d.day, hr, tzinfo=tz)
+            wk = TOU(self._fmt(self.start), self._fmt(self.end), False, self.clock)
+            if wk.is_peak(dt):
+                out.append(hr)
+        return out
+
+    def rate(self, peak):
+        return self.peak_rate if peak else self.offpeak_rate
+
+    @staticmethod
+    def _fmt(h):
+        return "%d:%02d" % (int(h), round((h - int(h)) * 60))
+
+
+def _hm(v):
+    if isinstance(v, (int, float)):
+        return float(v)
+    hh, mm = str(v).split(":")
+    return int(hh) + int(mm) / 60.0
+
+
+def _tou_days(series, s, tou, model):
+    """Per complete day: hourly kWh, the peak / pre / recovery windows, cost at
+    today's TOU rates as if the day had a peak window (so weekends are priced
+    comparably), the model's expected kWh and the season."""
+    power, outdoor = series.get("power", {}), series.get("outdoor", {})
+    days = {}
+    for ts, p in power.items():
+        if p.get("mean") is None:
+            continue
+        dt = datetime.fromtimestamp(ts, timezone.utc).astimezone(s.tz)
+        x = days.setdefault(dt.date(), {"kwh": {}, "aux": {}, "temps": [], "ts": {}})
+        x["kwh"][dt.hour] = x["kwh"].get(dt.hour, 0.0) + p["mean"] / 1000.0
+        x["aux"][dt.hour] = (p.get("max") or 0) > s.aux_threshold_w
+        x["ts"][dt.hour] = ts
+        if ts in outdoor and outdoor[ts].get("mean") is not None:
+            x["temps"].append(outdoor[ts]["mean"])
+    out = []
+    for d in sorted(days):
+        x = days[d]
+        if len(x["kwh"]) < _hours_in_day(d, s.tz) - 2 or len(x["temps"]) < 18:
+            continue
+        win = tou.window_hours(d, s.tz)
+        if not win:
+            continue
+        a, z = win[0], win[-1] + 1
+        pre = [h for h in range(a - 3, a) if 0 <= h < 24]
+        rec = [h for h in range(z, z + 3) if 0 <= h < 24]
+        k = x["kwh"]
+        exp = predict(model, x["temps"])
+        hh, cc = split(model, x["temps"])
+        out.append({
+            "date": d, "weekday": tou.has_peak(d), "kwh": sum(k.values()), "hours": k, "win": win,
+            "peak_kwh": sum(k.get(h, 0.0) for h in win), "pre_kwh": sum(k.get(h, 0.0) for h in pre),
+            "rec_kwh": sum(k.get(h, 0.0) for h in rec), "rec_aux": sum(1 for h in rec if x["aux"].get(h)),
+            "cost": sum(v * tou.rate(h in win) for h, v in k.items()),           # as if a peak day
+            "billed": sum(v * tou.rate(h in win and tou.has_peak(d)) for h, v in k.items()),
+            "expected": exp, "mode": "heat" if hh > cc and hh > 0.5 else ("cool" if cc > hh and cc > 0.5 else None),
+            "t_mean": sum(x["temps"]) / len(x["temps"]), "ts": x["ts"],
+        })
+    return out
+
+
+def _label(day, setpoints, s):
+    """setback / flat / other from the setpoint the thermostat actually used: the
+    peak-window mean against the 3 hours before it, in the saving direction
+    (cooling: higher, heating: lower). None when there is no setpoint data."""
+    sp = (setpoints or {}).get(day["mode"])
+    if not sp or day["mode"] is None:
+        return None
+    win = day["win"]
+    pre = [h for h in range(win[0] - 3, win[0]) if 0 <= h < 24]
+    get = lambda hrs: [sp[day["ts"][h]] for h in hrs if h in day["ts"] and day["ts"][h] in sp and sp[day["ts"][h]] is not None]
+    a, b = get(pre), get(win)
+    if len(a) < 2 or len(b) < 3:
+        return None
+    delta = sum(b) / len(b) - sum(a) / len(a)
+    if day["mode"] == "heat":
+        delta = -delta
+    big, small = (1.0, 0.5) if s.unit == "F" else (0.5, 0.3)
+    return "setback" if delta >= big else ("flat" if abs(delta) < small else "other")
+
+
+METRICS = ("cost", "kwh", "peak_kwh", "rec_kwh", "rec_aux", "excess")
+
+
+def _compare(test, ctrl, nbins=4):
+    """Weather-matched difference ctrl - test (positive = the test group used / cost
+    less). Days are binned on the model's expected kWh (the weather), differences
+    are taken inside each bin and combined with weights n1*n2/(n1+n2)."""
+    both = sorted(d["expected"] for d in test + ctrl if d["expected"] is not None)
+    if len(both) < 4:
+        return None
+    edges = [both[int(len(both) * i / nbins)] for i in range(1, nbins)]
+    bin_of = lambda v: sum(1 for e in edges if v >= e)
+    res = {"n_test": len(test), "n_ctrl": len(ctrl), "bins_used": 0}
+    acc = {m: [0.0, 0.0, 0.0] for m in METRICS}  # sum w*diff, sum w, sum w^2*var
+    for b in range(nbins):
+        t = [d for d in test if d["expected"] is not None and bin_of(d["expected"]) == b]
+        c = [d for d in ctrl if d["expected"] is not None and bin_of(d["expected"]) == b]
+        if len(t) < 2 or len(c) < 2:
+            continue
+        res["bins_used"] += 1
+        w = len(t) * len(c) / (len(t) + len(c))
+        for m in METRICS:
+            tv, cv = [d[m] for d in t], [d[m] for d in c]
+            mt, mc = sum(tv) / len(tv), sum(cv) / len(cv)
+            var = _var(tv) / len(tv) + _var(cv) / len(cv)
+            acc[m][0] += w * (mc - mt)
+            acc[m][1] += w
+            acc[m][2] += w * w * var
+    if res["bins_used"] == 0:
+        return None
+    for m in METRICS:
+        sw = acc[m][1]
+        res[m] = acc[m][0] / sw
+        res[m + "_se"] = math.sqrt(acc[m][2]) / sw
+    return res
+
+
+def _var(xs):
+    if len(xs) < 2:
+        return 0.0
+    m = sum(xs) / len(xs)
+    return sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+
+
+def tou_analysis(series, s, tou, model, now_ts, setpoints=None, min_days=5):
+    """Everything for the Time of use section. ``setpoints`` = {"cool": {ts: value},
+    "heat": {ts: value}} hourly means from the setpoint sensors."""
+    if tou is None or model is None:
+        return None
+    days = _tou_days(series, s, tou, model)
+    for d in days:
+        d["label"] = _label(d, setpoints, s) if d["weekday"] else None
+        d["excess"] = d["kwh"] - d["expected"] if d["expected"] is not None else 0.0
+    today = datetime.fromtimestamp(now_ts, timezone.utc).astimezone(s.tz).date()
+
+    # billed cost by month (only from the TOU start date when there is one)
+    months = {}
+    for d in days:
+        if tou.since and d["date"] < tou.since:
+            continue
+        m = months.setdefault(d["date"].strftime("%Y-%m"), {"kwh": 0.0, "peak_kwh": 0.0, "cost": 0.0, "days": 0})
+        m["kwh"] += d["kwh"]
+        m["peak_kwh"] += d["peak_kwh"] if d["weekday"] else 0.0
+        m["cost"] += d["billed"]
+        m["days"] += 1
+    spread = tou.peak_rate - tou.offpeak_rate
+    monthly = [{"month": k, "kwh": _r(v["kwh"], 1), "peak_kwh": _r(v["peak_kwh"], 1), "days": v["days"],
+                "peak_share": _r(100 * v["peak_kwh"] / v["kwh"], 1) if v["kwh"] else None,
+                "cost": _r(v["cost"], 2), "ceiling": _r(v["peak_kwh"] * spread, 2)} for k, v in sorted(months.items())]
+    recent = [d for d in days if d["date"] > today - timedelta(days=s.recent_days) and (not tou.since or d["date"] >= tou.since)]
+    rk = sum(d["kwh"] for d in recent)
+    rp = sum(d["peak_kwh"] for d in recent if d["weekday"])
+    last30 = {"days": len(recent), "kwh": _r(rk, 1), "peak_kwh": _r(rp, 1), "peak_share": _r(100 * rp / rk, 1) if rk else None,
+              "cost": _r(sum(d["billed"] for d in recent), 2), "ceiling": _r(rp * spread, 2)}
+
+    # does the setback pay? per season: setback weekdays vs flat weekdays (labeled from the setpoints - the clean
+    # comparison, and what an A/B test produces), else weekdays vs weekends (who's home differs too, so weaker)
+    compare, profiles = {}, {}
+    year_ago = today - timedelta(days=365)
+    for mode in ("cool", "heat"):
+        md = [d for d in days if d["mode"] == mode]
+        sb = [d for d in md if d["label"] == "setback"]
+        fl = [d for d in md if d["label"] == "flat"]
+        if len(sb) >= min_days and len(fl) >= min_days:
+            test, ctrl, method = sb, fl, "setpoints"
+        else:
+            test, ctrl, method = [d for d in md if d["weekday"]], [d for d in md if not d["weekday"]], "weekends"
+        c = _compare(test, ctrl) if len(test) >= min_days and len(ctrl) >= 3 else None
+        # weekdays a year in this season: its share of the weekdays that HAVE data (gaps would undercount), x 261
+        wk_all = [d for d in days if d["weekday"] and d["date"] > year_ago] or [d for d in days if d["weekday"]]
+        per_year = round(261 * sum(1 for d in wk_all if d["mode"] == mode) / len(wk_all)) if wk_all else 0
+        if c:
+            sav, se = c["cost"], c["cost_se"]
+            verdict = "not enough data" if c["bins_used"] < 2 else \
+                ("saves" if sav > 2 * se and sav > 0.02 else "costs" if sav < -2 * se and sav < -0.02 else "no clear difference")
+            c.update({"method": method, "verdict": verdict, "weekdays_per_year": per_year,
+                      "per_year": sav * per_year, "per_year_se": se * per_year})
+        compare[mode] = c or {"method": method, "verdict": "not enough data", "n_test": len(test), "n_ctrl": len(ctrl)}
+        compare[mode]["labeled_setback"] = len(sb)
+        compare[mode]["labeled_flat"] = len(fl)
+        if test and ctrl:
+            prof = lambda grp: [_r(sum(d["hours"].get(h, 0.0) for d in grp) / len(grp), 3) for h in range(24)]
+            profiles[mode] = {"test": prof(test), "ctrl": prof(ctrl), "method": method,
+                              "test_expected": _r(sum(d["expected"] for d in test) / len(test), 1),
+                              "ctrl_expected": _r(sum(d["expected"] for d in ctrl) / len(ctrl), 1),
+                              "window": test[0]["win"] if mode == "heat" else test[-1]["win"]}
+    for c in compare.values():
+        for k, v in list(c.items()):
+            if isinstance(v, float):
+                c[k] = _r(v, 3)
+    return {
+        "window": {"start": tou._fmt(tou.start), "end": tou._fmt(tou.end), "clock": tou.clock, "weekdays_only": tou.weekdays_only},
+        "rates": {"peak": tou.peak_rate, "offpeak": tou.offpeak_rate, "spread": _r(spread, 4)},
+        "since": tou.since.isoformat() if tou.since else None,
+        "monthly": monthly, "last30": last30, "compare": compare, "profiles": profiles,
+        "recent_labels": [{"date": d["date"].isoformat(), "mode": d["mode"], "label": d["label"]}
+                          for d in days[-21:] if d["weekday"] and d["label"]],
     }

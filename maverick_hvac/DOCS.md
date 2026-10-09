@@ -63,13 +63,58 @@ days. Afternoon bumps are usually sun.
 toward the outdoor temperature. Larger is a tighter house. Noisy hour to hour;
 useful as a trend.
 
+## Time of use
+
+Set `tou_peak_start` and `tou_peak_end` to turn this section on.
+
+- **What the peak costs.** HVAC energy and cost by peak / off-peak, per month and
+  for the last 30 days, from `tou_since` (when TOU billing began).
+- **The ceiling.** What the last 30 days would have saved if *every* peak kWh had
+  moved to off-peak: peak kWh × (peak rate − off-peak rate). Usually small - it
+  is the most any setpoint strategy could save.
+- **Does a peak setback pay?** Per season (cooling, heating), days with the
+  setback are compared with days without it **in the same weather**: days are
+  grouped by the model's expected energy and compared within each group. It
+  reports the difference in cost (at today's rates), total energy, peak energy,
+  the recovery after the peak, aux hours during that recovery, and a verdict -
+  *saves*, *costs*, or *no clear difference* (the difference has to be at least
+  twice its standard error).
+
+Which days count as setback days:
+
+- **With setpoint sensors** (`cool_setpoint_entity`, `heat_setpoint_entity`) each
+  weekday is labeled from what the thermostat actually did: the setpoint during
+  the peak compared with the three hours before it. Once there are 5 setback and
+  5 flat weekdays in a season, they are compared directly.
+- **Until then**, weekdays are compared with weekends (no peak). Who's home also
+  differs between them, so treat that as a hint.
+
+The clean answer is an **A/B test**: alternate weeks with and without the setback
+for 4-6 weeks per season. The page shows how many of each it has.
+
+Every day is priced at *today's* rates, so history from before TOU billing still
+answers "would this pay now?".
+
+| Option | |
+|---|---|
+| `tou_peak_start`, `tou_peak_end` | `HH:MM`. Empty = section off. |
+| `tou_weekdays_only` | Weekends off-peak. Default true. |
+| `tou_clock` | `standard`: the times are in standard time and move an hour later in daylight saving (a peak of 3-8 PM EST = 4-9 PM EDT). `local`: they never move. |
+| `tou_peak_rate`, `tou_offpeak_rate` | Per kWh. |
+| `tou_peak_rate_entity`, `tou_offpeak_rate_entity` | Optional: read the rates from entities (an `input_number`) so a rate change in Home Assistant is picked up. |
+| `tou_since` | `YYYY-MM-DD`: billed cost counts from here. |
+| `heat_setpoint_entity`, `cool_setpoint_entity` | Numeric setpoint sensors with statistics (a template sensor of the thermostat's target temperature). |
+| `currency` | Unit of the cost entities. Default `USD`. |
+
 ## Entities
 
 With an MQTT broker (the Mosquitto add-on), the headline numbers appear as
 entities on a **Maverick HVAC** device: balance points, cold knee, slopes, base
 load, model fit, expected today / tomorrow, yesterday's actual / expected / index, the
 30-day index, capacity limits, aux onset, aux share and hours, mild-weather aux
-hours, house time constant, last analysis, and a `problem` diagnostic.
+hours, house time constant, last analysis, and a `problem` diagnostic. With a
+peak window: HVAC cost and peak share over 30 days, the shifting ceiling, and the
+peak setback's value ($ a day) and verdict for cooling and heating.
 
 Without a broker, everything is still on the add-on's page.
 

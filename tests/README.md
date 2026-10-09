@@ -13,6 +13,11 @@ context, so adding a check never needs a `version` bump.
 - `test_analysis.py` - the model recovers the house (parameters with tolerances,
   predictions held tight), gaps are reported, glitch days drop out, too little
   data degrades without crashing, Celsius, DST day lengths.
+- `test_tou.py` - the peak window (standard vs local clock across DST, weekends,
+  across midnight), billed months from `tou_since`, and a KNOWN setback (35 % of
+  peak energy cut, half of it back in the recovery) recovered both ways: weekdays
+  vs weekends, and an alternate-week A/B labeled from synthetic setpoints. No
+  setback must give no verdict.
 - `test_service.py` - every MQTT entity has a state key, the page's endpoints, and
   the page uses only relative URLs (ingress).
 

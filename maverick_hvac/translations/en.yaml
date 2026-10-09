@@ -38,5 +38,36 @@ configuration:
   rooms:
     name: Rooms
     description: Room temperature sensors to compare with the thermostat (entity, optional name).
+  heat_setpoint_entity:
+    name: Heat setpoint sensor
+    description: A numeric sensor of the heating setpoint (with statistics). Labels each weekday as a peak setback or not, from what the thermostat actually did.
+  cool_setpoint_entity:
+    name: Cool setpoint sensor
+    description: The same for the cooling setpoint.
+  tou_peak_start:
+    name: Peak starts (HH:MM)
+    description: Leave empty to turn the time-of-use section off.
+  tou_peak_end:
+    name: Peak ends (HH:MM)
+  tou_weekdays_only:
+    name: Peak on weekdays only
+  tou_clock:
+    name: Peak window clock
+    description: "standard = the times above are in standard time and move an hour later during daylight saving (a peak that is 3-8 PM EST and 4-9 PM EDT); local = the clock times never move."
+  tou_peak_rate:
+    name: Peak rate (per kWh)
+  tou_offpeak_rate:
+    name: Off-peak rate (per kWh)
+  tou_peak_rate_entity:
+    name: Peak rate entity
+    description: Optional. Read the peak rate from this entity instead (an input_number), so a rate change in Home Assistant is picked up.
+  tou_offpeak_rate_entity:
+    name: Off-peak rate entity
+  tou_since:
+    name: TOU billing since (YYYY-MM-DD)
+    description: Billed cost is only counted from this date. Strategy comparisons use every day, priced at today's rates.
+  currency:
+    name: Currency
+    description: Unit for the cost entities (default USD).
   log_level:
     name: Log level

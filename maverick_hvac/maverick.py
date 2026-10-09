@@ -60,6 +60,14 @@ ENTITIES = [
     ("aux_mild_hours_recent", "Mild-weather aux hours, 30 days", "h", "duration", "measurement", "mdi:radiator-off"),
     ("aux_mild_hours_year", "Mild-weather aux hours, 12 months", "h", "duration", "measurement", "mdi:radiator-off"),
     ("time_constant", "House time constant", "h", "duration", "measurement", "mdi:home-thermometer-outline"),
+    # time of use (only published with tou_peak_start set); money has no state_class - it's a rolling window
+    ("tou_cost_30d", "HVAC cost, 30 days", "$", None, None, "mdi:cash"),
+    ("tou_peak_share_30d", "HVAC energy in peak hours, 30 days", "%", None, "measurement", "mdi:transmission-tower"),
+    ("tou_ceiling_30d", "Most shifting could save, 30 days", "$", None, None, "mdi:cash-clock"),
+    ("setback_cooling_value", "Peak setback value, cooling", "$", None, None, "mdi:thermostat-auto"),
+    ("setback_cooling_verdict", "Peak setback verdict, cooling", None, None, None, "mdi:scale-balance"),
+    ("setback_heating_value", "Peak setback value, heating", "$", None, None, "mdi:thermostat-auto"),
+    ("setback_heating_verdict", "Peak setback verdict, heating", None, None, None, "mdi:scale-balance"),
     ("last_analysis", "Last analysis", None, "timestamp", None, "mdi:clock-check-outline"),
     ("problem", "Problem", None, None, None, "mdi:alert-circle-outline"),
 ]
@@ -131,6 +139,9 @@ def fetch(opts):
              "indoor": opts["indoor_temperature_entity"]}
     if opts.get("compressor_duty_entity"):
         roles["duty"] = opts["compressor_duty_entity"]
+    for mode in ("cool", "heat"):
+        if opts.get(f"{mode}_setpoint_entity"):
+            roles["sp:" + mode] = opts[f"{mode}_setpoint_entity"]
     names = {}
     for r in opts.get("rooms") or []:
         roles["room:" + r["entity"]] = r["entity"]
@@ -143,6 +154,10 @@ def fetch(opts):
         tz = ZoneInfo(cfg.get("time_zone") or "UTC")
         stats = ha.statistics(sorted(set(roles.values())), start, end,
                               {"temperature": "°" + unit, "power": "W"})
+        rate_states = {}
+        wanted = {opts.get(k) for k in ("tou_peak_rate_entity", "tou_offpeak_rate_entity")} - {None, ""}
+        if wanted:
+            rate_states = {x["entity_id"]: x["state"] for x in ha.call({"type": "get_states"}) if x["entity_id"] in wanted}
         fc = []
         if opts.get("weather_entity"):
             try:
@@ -150,7 +165,8 @@ def fetch(opts):
             except Exception as e:  # a missing forecast only costs the "expected" numbers
                 LOG.warning("forecast unavailable: %s", e)
     series = {role: stats.get(sid, {}) for role, sid in roles.items()}
-    missing = [sid for role, sid in roles.items() if not series[role]]
+    missing = [sid for role, sid in roles.items() if not series[role] and not role.startswith("sp:")]
+    setpoints = {role[3:]: {ts: v.get("mean") for ts, v in series.pop(role).items()} for role in list(series) if role.startswith("sp:")}
     now = datetime.now(tz)
     today, tomorrow = now.date(), now.date() + timedelta(days=1)
     f_today, f_tom = [], []
@@ -163,7 +179,7 @@ def fetch(opts):
             f_today.append(float(t))
         elif dt.date() == tomorrow:
             f_tom.append(float(t))
-    return series, names, {"today": f_today, "tomorrow": f_tom}, missing, tz
+    return series, names, {"today": f_today, "tomorrow": f_tom}, missing, tz, setpoints, rate_states
 
 
 # ----------------------------------------------------------------------------
@@ -171,8 +187,8 @@ def fetch(opts):
 # ----------------------------------------------------------------------------
 
 class Publisher:
-    def __init__(self, unit):
-        self.unit = unit
+    def __init__(self, unit, currency="USD", tou=False):
+        self.unit, self.currency, self.tou = unit, currency, tou
         self.client = None
         host = os.environ.get("MQTT_HOST")
         if not host:
@@ -199,6 +215,10 @@ class Publisher:
             cfg = {"name": name, "unique_id": f"maverick_hvac_{key}", "object_id": f"maverick_hvac_{key}",
                    "state_topic": f"{TOPIC}/state", "value_template": "{{ value_json.%s }}" % key,
                    "availability_topic": f"{TOPIC}/status", "device": dev, "icon": icon}
+            if key.startswith(("tou_", "setback_")) and not self.tou:
+                continue  # no peak window configured: don't create the TOU entities at all
+            if unit == "$":
+                unit = self.currency
             if unit:
                 cfg["unit_of_measurement"] = "°" + self.unit if unit == "T" else unit
             if dc:
@@ -228,9 +248,43 @@ def headline_state(res, problem):
         "model_fit": round(100 * m["r2"], 1) if m.get("r2") is not None else None,
         "time_constant": round(res["coast"]["tau_h"], 1) if res and (res.get("coast") or {}).get("tau_h") else None,
         "last_analysis": (res or {}).get("generated"),
+        **tou_state((res or {}).get("tou")),
         "problem": problem or "none",
     })
     return h
+
+
+def tou_state(t):
+    t = t or {}
+    l30, cmp = t.get("last30") or {}, t.get("compare") or {}
+    out = {"tou_cost_30d": l30.get("cost"), "tou_peak_share_30d": l30.get("peak_share"), "tou_ceiling_30d": l30.get("ceiling")}
+    for mode, name in (("cool", "cooling"), ("heat", "heating")):
+        c = cmp.get(mode) or {}
+        out[f"setback_{name}_value"] = c.get("cost")  # $ a day the setback saves (negative = costs)
+        out[f"setback_{name}_verdict"] = c.get("verdict") if t else None
+    return out
+
+
+def tou_settings(opts, states):
+    """analysis.TOU from the options, or None when no peak window is set. Rates
+    come from entities when given (so a rate change in Home Assistant is picked
+    up), else from the numbers."""
+    if not opts.get("tou_peak_start") or not opts.get("tou_peak_end"):
+        return None
+
+    def rate(key):
+        ent = opts.get(key + "_entity")
+        if ent and ent in states:
+            try:
+                return float(states[ent])
+            except ValueError:
+                LOG.warning("%s is not a number: %s", ent, states[ent])
+        return float(opts.get(key) or 0)
+
+    since = opts.get("tou_since")
+    return analysis.TOU(opts["tou_peak_start"], opts["tou_peak_end"], opts.get("tou_weekdays_only", True),
+                        opts.get("tou_clock", "local"), rate("tou_peak_rate"), rate("tou_offpeak_rate"),
+                        datetime.strptime(since, "%Y-%m-%d").date() if since else None)
 
 
 # ----------------------------------------------------------------------------
@@ -245,7 +299,7 @@ class Service:
         self.running = False
         self.lock = threading.Lock()
         self.wake = threading.Event()
-        self.publisher = Publisher(opts["temperature_unit"])
+        self.publisher = Publisher(opts["temperature_unit"], opts.get("currency") or "USD", bool(opts.get("tou_peak_start")))
 
     def run_once(self):
         with self.lock:
@@ -254,13 +308,14 @@ class Service:
             self.running = True
         t0 = time.time()
         try:
-            series, names, fc, missing, tz = fetch(self.opts)
+            series, names, fc, missing, tz, setpoints, rate_states = fetch(self.opts)
             s = analysis.Settings(tz, unit=self.opts["temperature_unit"],
                                   aux_threshold_w=self.opts.get("aux_threshold_w"),
                                   heat_pump_running_w=self.opts.get("heat_pump_running_w"),
                                   aux_mild_above=self.opts.get("aux_mild_above"),
                                   model_days=self.opts.get("model_days"))
-            res = analysis.analyze(series, s, time.time(), names=names, forecast=fc)
+            res = analysis.analyze(series, s, time.time(), names=names, forecast=fc,
+                                   tou=tou_settings(self.opts, rate_states), setpoints=setpoints)
             res["missing"] = missing
             res["elapsed_s"] = round(time.time() - t0, 1)
             res["options"] = dict(self.opts)
