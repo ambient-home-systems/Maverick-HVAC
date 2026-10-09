@@ -1,5 +1,5 @@
 name: Maverick HVAC
-version: "0.2.0"
+version: "0.3.0"
 slug: maverick_hvac
 description: Heat pump and HVAC efficiency analysis from Home Assistant's long-term statistics
 url: https://github.com/ambient-home-systems/Maverick-HVAC

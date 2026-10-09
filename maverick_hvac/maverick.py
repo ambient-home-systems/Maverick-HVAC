@@ -68,6 +68,8 @@ ENTITIES = [
     ("setback_cooling_verdict", "Peak setback verdict, cooling", None, None, None, "mdi:scale-balance"),
     ("setback_heating_value", "Peak setback value, heating", "$", None, None, "mdi:thermostat-auto"),
     ("setback_heating_verdict", "Peak setback verdict, heating", None, None, None, "mdi:scale-balance"),
+    # the room in the current season that the setback moves most (°, signed: + warmer / - cooler); every room in attributes
+    ("setback_room_impact", "Peak setback, biggest room change", "T", "temperature", None, "mdi:home-thermometer"),
     ("last_analysis", "Last analysis", None, "timestamp", None, "mdi:clock-check-outline"),
     ("problem", "Problem", None, None, None, "mdi:alert-circle-outline"),
 ]
@@ -190,6 +192,7 @@ class Publisher:
     def __init__(self, unit, currency="USD", tou=False):
         self.unit, self.currency, self.tou = unit, currency, tou
         self.client = None
+        self.last = self.last_rooms = None
         host = os.environ.get("MQTT_HOST")
         if not host:
             LOG.warning("no MQTT broker - results are only on the add-on page")
@@ -206,7 +209,6 @@ class Publisher:
         c.connect_async(host, int(os.environ.get("MQTT_PORT", "1883")))
         c.loop_start()
         self.client = c
-        self.last = None
 
     def _on_connect(self, c, *a):
         dev = {"identifiers": ["maverick_hvac"], "name": "Maverick HVAC", "manufacturer": "Ambient Home Systems",
@@ -227,15 +229,23 @@ class Publisher:
                 cfg["state_class"] = sc
             if key == "problem":
                 cfg["entity_category"] = "diagnostic"
+            if key == "setback_room_impact":
+                cfg["json_attributes_topic"] = f"{TOPIC}/rooms"
             c.publish(f"homeassistant/sensor/maverick_hvac/{key}/config", json.dumps(cfg), retain=True)
         c.publish(f"{TOPIC}/status", "online", retain=True)
         if self.last:
             c.publish(f"{TOPIC}/state", self.last, retain=True)
+        if getattr(self, "last_rooms", None):
+            c.publish(f"{TOPIC}/rooms", self.last_rooms, retain=True)
 
-    def publish(self, state):
+    def publish(self, state, rooms=None):
         self.last = json.dumps(state)
+        if rooms is not None:
+            self.last_rooms = json.dumps(rooms)
         if self.client:
             self.client.publish(f"{TOPIC}/state", self.last, retain=True)
+            if getattr(self, "last_rooms", None):
+                self.client.publish(f"{TOPIC}/rooms", self.last_rooms, retain=True)
 
 
 def headline_state(res, problem):
@@ -262,6 +272,22 @@ def tou_state(t):
         c = cmp.get(mode) or {}
         out[f"setback_{name}_value"] = c.get("cost")  # $ a day the setback saves (negative = costs)
         out[f"setback_{name}_verdict"] = c.get("verdict") if t else None
+    rooms = (cmp.get(t.get("season")) or {}).get("rooms") or []
+    real = [r for r in rooms if r.get("extra_drift") is not None]
+    out["setback_room_impact"] = max(real, key=lambda r: abs(r["extra_drift"]))["extra_drift"] if real else None
+    return out
+
+
+def room_attributes(t):
+    """json_attributes for setback_room_impact: per room, both seasons."""
+    t = t or {}
+    out = {"season": t.get("season")}
+    for mode, name in (("cool", "cooling"), ("heat", "heating")):
+        c = (t.get("compare") or {}).get(mode) or {}
+        out[name + "_method"] = c.get("method")
+        out[name] = [{k: r.get(k) for k in ("name", "extra_drift", "extra_drift_se", "drift_test", "drift_ctrl", "end_test",
+                                            "end_ctrl", "end_worst", "back_test", "back_ctrl", "n_test", "n_ctrl")}
+                     for r in c.get("rooms") or []]
     return out
 
 
@@ -332,7 +358,8 @@ class Service:
             LOG.exception("analysis failed")
             self.problem = f"analysis failed: {e}"
         finally:
-            self.publisher.publish(headline_state(self.results, self.problem))
+            self.publisher.publish(headline_state(self.results, self.problem),
+                                   room_attributes((self.results or {}).get("tou")) if self.opts.get("tou_peak_start") else None)
             with self.lock:
                 self.running = False
         return True

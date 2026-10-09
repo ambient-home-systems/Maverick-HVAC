@@ -32,7 +32,8 @@ def test_window():
     check("window hours on a weekend day (as if peak)", std.window_hours(date(2026, 1, 10), NY) == [15, 16, 17, 18, 19])
 
 
-CUT, BACK = 0.35, 0.5   # the setback removes 35 % of peak-hour energy; half of it comes back in the 3 h after
+CUT, BACK = 0.35, 0.5
+ROOM_RISE = 1.5   # degrees the sunny room gains by the end of a setback peak   # the setback removes 35 % of peak-hour energy; half of it comes back in the 3 h after
 
 
 def house_with_setback(setback_day):
@@ -56,6 +57,13 @@ def house_with_setback(setback_day):
             sp[ts] = 74.0 if (on and h in win) else 72.0
         if not on:
             continue
+        # the sunny room warms 1.5 degrees by the end of a setback peak (ramping), and is back 2 h after
+        for k, h in enumerate(win):
+            if h in hrs:
+                series["room:sensor.sunny"][hrs[h]]["mean"] += ROOM_RISE * (k + 1) / len(win)
+        for k, h in enumerate(range(win[-1] + 1, win[-1] + 3)):
+            if h in hrs:
+                series["room:sensor.sunny"][hrs[h]]["mean"] += ROOM_RISE * (1 - (k + 1) / 2)
         removed = 0.0
         for h in win:
             if h in hrs:
@@ -102,6 +110,13 @@ def test_setback_ab_labeled():
           (c["method"], c["labeled_setback"], c["labeled_flat"]))
     check("A/B recovers the saving", abs(c["cost"] - true_saving_) < max(0.1, 2.5 * c["cost_se"]), (c["cost"], round(true_saving_, 3), c["cost_se"]))
     check("A/B recovery energy seen", c["rec_kwh"] < 0, c["rec_kwh"])
+    rooms = {r["name"]: r for r in c["rooms"]}
+    check("rooms: thermostat and both rooms compared", {"Thermostat", "sensor.sunny", "sensor.cold"} <= set(rooms), sorted(rooms))
+    sunny, cold = rooms["sensor.sunny"], rooms["sensor.cold"]
+    check("rooms: the setback's extra warming found", abs(sunny["extra_drift"] - ROOM_RISE) < max(0.25, 2.5 * sunny["extra_drift_se"]),
+          (sunny["extra_drift"], sunny["extra_drift_se"]))
+    check("rooms: an unaffected room shows none", abs(cold["extra_drift"]) < max(0.2, 2.5 * cold["extra_drift_se"]), (cold["extra_drift"], cold["extra_drift_se"]))
+    check("rooms: hourly profile for the chart", len(sunny["profile_test"]) == 24 and sunny["profile_test"][18] is not None)
 
 
 def test_no_setback_no_effect():

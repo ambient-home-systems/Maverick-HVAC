@@ -38,6 +38,8 @@ def test_entities_have_state():
     check("problem reads 'none' when healthy", st["problem"] == "none")
     st2 = mv.headline_state(None, "boom")
     check("no results yet still produces a state", st2["problem"] == "boom" and st2["heat_balance"] is None)
+    attrs = mv.room_attributes(None)
+    check("room attributes without TOU results", attrs["cooling"] == [] and attrs["heating"] == [])
     keys = [k for k, *_ in mv.ENTITIES]
     check("entity keys unique", len(keys) == len(set(keys)))
     page = open(os.path.join(os.path.dirname(mv.__file__), "ui.html")).read()
